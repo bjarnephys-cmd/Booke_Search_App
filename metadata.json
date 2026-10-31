@@ -1,0 +1,6 @@
+{
+  "name": "BogAnbefaling - Boganbefalinger & Litteratur Database",
+  "description": "Boganbefalingsapplikation med søgning på forfattere, titler og genrer, brugerstyring og intelligent anbefalingsmotor baseret på alder og præferencer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
