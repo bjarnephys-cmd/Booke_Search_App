@@ -14,6 +14,7 @@ import { UserManagementSection } from './components/UserManagementSection.tsx';
 import { PhpBackendSection } from './components/PhpBackendSection.tsx';
 import { RateBookModal } from './components/RateBookModal.tsx';
 import { UserModal } from './components/UserModal.tsx';
+import { LiveLogDrawer } from './components/LiveLogDrawer.tsx';
 import { BookOpen, Layers, Users, Star } from 'lucide-react';
 
 export default function App() {
@@ -35,17 +36,23 @@ export default function App() {
 
   const loadInitialData = async () => {
     try {
-      const [usersData, statsData] = await Promise.all([
+      const [usersResult, statsResult] = await Promise.allSettled([
         fetchUsers(undefined, 100),
         fetchStats(),
       ]);
-      setUsers(usersData.users);
-      setStats(statsData);
 
-      // Default to User #12 or first user if not set
-      if (!currentUser && usersData.users.length > 0) {
-        const defaultUser = usersData.users.find((u) => u.id === 12) || usersData.users[0];
-        setCurrentUser(defaultUser);
+      if (usersResult.status === 'fulfilled') {
+        setUsers(usersResult.value.users);
+        if (!currentUser && usersResult.value.users.length > 0) {
+          const defaultUser = usersResult.value.users.find((u) => u.id === 12) || usersResult.value.users[0];
+          setCurrentUser(defaultUser);
+        }
+      } else {
+        console.warn('Fejl ved hentning af brugere:', usersResult.reason);
+      }
+
+      if (statsResult.status === 'fulfilled') {
+        setStats(statsResult.value);
       }
     } catch (err) {
       console.error('Fejl ved indlæsning af startdata:', err);
@@ -116,6 +123,7 @@ export default function App() {
         user={currentUser}
         onOpenSwitchModal={() => setIsUserModalOpen(true)}
         onViewRecommendations={() => setActiveTab('recommendations')}
+        onNavigateToBackend={() => setActiveTab('php-api')}
       />
 
       {/* Main Content Area */}
@@ -169,6 +177,9 @@ export default function App() {
         }}
         onCreateUser={handleCreateUser}
       />
+
+      {/* Real-time In-App Console & Network Log Drawer */}
+      <LiveLogDrawer />
 
       {/* Footer with quantitative metrics and PRD reference */}
       <footer className="mt-auto border-t border-stone-200 bg-white">

@@ -15,8 +15,10 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onRate, highlightReaso
     desc: 'Litteratur',
   };
 
-  // Score display helper
-  const scorePercent = Math.min(100, Math.max(0, (book.score / 9) * 100));
+  // Safe score display helper (handles both number and string from MySQL/PHP PDO)
+  const scoreNum = typeof book.score === 'number' ? book.score : (parseFloat(String(book.score)) || 0);
+  const formattedScore = isNaN(scoreNum) ? '0.0' : scoreNum.toFixed(1);
+  const scorePercent = Math.min(100, Math.max(0, (scoreNum / 9) * 100));
 
   return (
     <article className="group relative flex flex-col bg-white rounded-xl border border-stone-200/90 hover:border-stone-400 hover:shadow-md transition-all duration-200 overflow-hidden">
@@ -32,7 +34,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onRate, highlightReaso
           </span>
           <div className="flex items-center gap-1 bg-stone-900/80 backdrop-blur-xs px-2 py-0.5 rounded text-amber-300 text-xs font-mono-data font-semibold">
             <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-            <span>{book.score.toFixed(1)}</span>
+            <span>{formattedScore}</span>
             <span className="text-white/40 text-[10px]">/ 9</span>
           </div>
         </div>
@@ -82,7 +84,7 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onRate, highlightReaso
           <div className="flex-1">
             <div className="flex justify-between items-center text-[11px] text-stone-500 mb-1 font-mono-data">
               <span>Score</span>
-              <span className="font-semibold text-stone-800">{book.score.toFixed(1)} / 9.0</span>
+              <span className="font-semibold text-stone-800">{formattedScore} / 9.0</span>
             </div>
             <div className="w-full h-1.5 bg-stone-100 rounded-full overflow-hidden">
               <div

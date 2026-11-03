@@ -1,18 +1,30 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { User } from '../types.ts';
-import { UserCheck, Sparkles, BookMarked, ArrowRightLeft } from 'lucide-react';
+import { UserCheck, Sparkles, BookMarked, ArrowRightLeft, Database } from 'lucide-react';
+import { isUsingPhpBackend, getBackendBaseUrl } from '../services/api.ts';
 
 interface ActiveUserBarProps {
   user: User | null;
   onOpenSwitchModal: () => void;
   onViewRecommendations: () => void;
+  onNavigateToBackend: () => void;
 }
 
 export const ActiveUserBar: React.FC<ActiveUserBarProps> = ({
   user,
   onOpenSwitchModal,
   onViewRecommendations,
+  onNavigateToBackend,
 }) => {
+  const [usingPhp, setUsingPhp] = useState(isUsingPhpBackend());
+
+  useEffect(() => {
+    const handleBackendChange = () => {
+      setUsingPhp(isUsingPhpBackend());
+    };
+    window.addEventListener('backend-target-changed', handleBackendChange);
+    return () => window.removeEventListener('backend-target-changed', handleBackendChange);
+  }, []);
   if (!user) return null;
 
   return (
@@ -48,8 +60,24 @@ export const ActiveUserBar: React.FC<ActiveUserBarProps> = ({
             )}
           </div>
 
-          {/* Quick actions */}
+          {/* Quick actions & Backend indicator */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Backend toggle indicator */}
+            <div className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded bg-stone-800/90 border border-stone-700 text-[11px]">
+              <Database className="w-3 h-3 text-stone-400" />
+              <span className="text-stone-400">Backend:</span>
+              <span className={usingPhp ? 'text-cyan-300 font-semibold' : 'text-amber-400 font-semibold'}>
+                {usingPhp ? 'PHP / MySQL' : 'SQLite (Lokal)'}
+              </span>
+              <button
+                onClick={onNavigateToBackend}
+                className="ml-1 text-stone-300 hover:text-white underline"
+                title="Klik for at skifte mellem SQLite og PHP backend"
+              >
+                Skift
+              </button>
+            </div>
+
             <button
               onClick={onViewRecommendations}
               className="flex items-center gap-1 px-2.5 py-1 text-amber-300 hover:text-amber-200 hover:bg-stone-800/80 rounded transition-colors"

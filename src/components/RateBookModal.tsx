@@ -13,11 +13,14 @@ export const RateBookModal: React.FC<RateBookModalProps> = ({
   onClose,
   onSubmitRate,
 }) => {
-  const [score, setScore] = useState<number>(book ? Math.round(book.score) : 7);
+  const initialScore = book ? Math.round(Number(book.score) || 0) : 7;
+  const [score, setScore] = useState<number>(initialScore);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!book) return null;
+
+  const currentAvgScore = (Number(book.score) || 0).toFixed(1);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,7 +61,7 @@ export const RateBookModal: React.FC<RateBookModalProps> = ({
             <div className="flex items-center justify-between text-xs text-stone-500 mb-2">
               <span>Nuværende gennemsnit</span>
               <span className="font-mono-data font-semibold text-stone-900">
-                {book.score.toFixed(1)} / 9.0 ({book.rating_count} bedømmelser)
+                {currentAvgScore} / 9.0 ({book.rating_count} bedømmelser)
               </span>
             </div>
             <div className="text-xs text-stone-500">

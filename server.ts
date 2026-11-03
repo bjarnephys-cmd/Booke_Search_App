@@ -23,6 +23,14 @@ initDatabase();
 
 app.use(express.json());
 
+// Request logger middleware
+app.use((req, res, next) => {
+  if (req.url.startsWith('/api')) {
+    console.log(`[Express Backend] Modtog kald: ${req.method} ${req.url}`);
+  }
+  next();
+});
+
 // --- REST API ENDPOINTS (Milestone 2 & 4) ---
 
 // 1. GET /api/books?search=...&genre=...&author=...&minScore=...&sortBy=...&page=...&limit=...
@@ -179,6 +187,18 @@ app.post('/api/reset', (_req: Request, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// 9. GET /api/ping - Diagnostics, server region and RTT endpoint
+app.get('/api/ping', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    timestamp: Date.now(),
+    region: 'europe-west2',
+    regionName: 'London, Storbritannien (Google Cloud Run)',
+    platform: 'Node.js Express + SQLite (Port 3000)',
+    message: 'Pong fra lokal applet backend',
+  });
 });
 
 // Start server with Vite middleware in dev or static files in production

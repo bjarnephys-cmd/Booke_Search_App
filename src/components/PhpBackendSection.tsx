@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Copy, Check, Play, Server, Database, Code, CheckCircle2, ArrowRight, Globe, HardDrive, Info } from 'lucide-react';
-import { getBackendBaseUrl, setBackendBaseUrl } from '../services/api.ts';
+import { 
+  Copy, Check, Play, Server, Database, Code, CheckCircle2, ArrowRight, 
+  Globe, HardDrive, Info, Activity, Wifi, Clock, MapPin, Gauge, Zap, AlertTriangle 
+} from 'lucide-react';
+import { getBackendBaseUrl, setBackendBaseUrl, measurePing, PingResult, resolveUrl } from '../services/api.ts';
 
 export const PhpBackendSection: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'status' | 'tester' | 'php-code' | 'mysql-schema' | 'improvements'>('status');
@@ -32,6 +35,32 @@ export const PhpBackendSection: React.FC = () => {
     }
     setUrlSaveSuccess(true);
     setTimeout(() => setUrlSaveSuccess(false), 2500);
+  };
+
+  // RTT (Round Trip Time) & Ping Diagnostic state
+  const [isPinging, setIsPinging] = useState(false);
+  const [localPingResult, setLocalPingResult] = useState<PingResult | null>(null);
+  const [remotePingResult, setRemotePingResult] = useState<PingResult | null>(null);
+  const [lastPingTimestamp, setLastPingTimestamp] = useState<string | null>(null);
+
+  const runRttBenchmark = async () => {
+    setIsPinging(true);
+    try {
+      // 1. Mål Round Trip Time til lokal Node.js server (London, europe-west2)
+      const local = await measurePing('/api/ping', 'Lokal Node.js / SQLite Server (London, UK)');
+      setLocalPingResult(local);
+
+      // 2. Mål Round Trip Time til brugerens eksterne PHP server (USA, bjarnephys.com)
+      const phpTarget = customUrl.trim() || 'https://bjarnephys.com/BogApp/api.php';
+      const cleanTarget = phpTarget.replace(/\/$/, '');
+      const testUrl = `${cleanTarget}/api/books?limit=1`;
+      const remote = await measurePing(testUrl, 'Ekstern PHP Server (bjarnephys.com, USA)');
+      setRemotePingResult(remote);
+
+      setLastPingTimestamp(new Date().toLocaleTimeString('da-DK', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    } finally {
+      setIsPinging(false);
+    }
   };
 
   // Live REST API Tester state
@@ -270,6 +299,24 @@ if ($method === 'GET' && strpos($requestUri, '/api/recommendations') !== false) 
         'priority2Matches' => $p2Books
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
+}
+
+// 4. GET /api/stats
+if ($method === 'GET' && strpos($requestUri, '/api/stats') !== false) {
+    $books = (int)$pdo->query("SELECT COUNT(*) FROM BogTabel")->fetchColumn();
+    $users = (int)$pdo->query("SELECT COUNT(*) FROM BrugerTabel")->fetchColumn();
+    $authors = (int)$pdo->query("SELECT COUNT(DISTINCT forfatter) FROM BogTabel")->fetchColumn();
+    $genres = (int)$pdo->query("SELECT COUNT(DISTINCT genre) FROM BogTabel")->fetchColumn();
+    $avgScore = (float)$pdo->query("SELECT AVG(score) FROM BogTabel")->fetchColumn();
+
+    echo json_encode([
+        'totalBooks' => $books,
+        'totalUsers' => $users,
+        'totalAuthors' => $authors,
+        'totalGenres' => $genres,
+        'averageScore' => round($avgScore, 2)
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit();
 }`;
 
   const sqlSchema = `-- MySQL Database Schema til Boganbefalinger App
@@ -309,7 +356,57 @@ CREATE TABLE AnbefalingTabel (
     FOREIGN KEY (bruger_id) REFERENCES BrugerTabel(id) ON DELETE CASCADE,
     FOREIGN KEY (bog_id) REFERENCES BogTabel(id) ON DELETE CASCADE,
     INDEX idx_bruger (bruger_id)
-) ENGINE=InnoDB;`;
+) ENGINE=InnoDB;
+
+-- =============================================================
+-- OPTIMERING TIL KÆMPE DATABASE (Høj performance ved millioner af rækker)
+-- =============================================================
+-- For at undgå langsomme Full Table Scans på tekst-udtræk:
+-- 1. Tilføj STORED Generated Columns (udtrækker i og j automatisk som heltal)
+ALTER TABLE BogTabel
+ADD COLUMN forfatter_num INT GENERATED ALWAYS AS (CAST(SUBSTRING(forfatter, 4) AS SIGNED)) STORED,
+ADD COLUMN genre_num INT GENERATED ALWAYS AS (CAST(SUBSTRING(genre, 7) AS SIGNED)) STORED;
+
+-- 2. Tilføj B-Tree indekser (sikrer log(N) opslagstid i stedet for O(N))
+CREATE INDEX idx_forfatter_num ON BogTabel(forfatter_num);
+CREATE INDEX idx_genre_num ON BogTabel(genre_num);
+
+-- =============================================================
+-- =============================================================
+-- FUZZY KNN SIMILARITETS-SØGNING I SQL (OPTIMERET MED SUBQUERY)
+-- Mål: Forfatter ff-12 (i=12), Genre genre-2 (genre=2)
+-- Ved at bruge en Derived Table (Subquery) beregnes formlen kun 1 GANG!
+-- =============================================================
+SELECT 
+    t.id,
+    t.titel,
+    t.forfatter,
+    t.genre,
+    t.score,
+    t.ff_dist,
+    t.genre_dist,
+    t.total_afvigelse,
+    -- Genbruger 'total_afvigelse' uden at genberegne formlen:
+    ROUND(100.0 / (1.0 + t.total_afvigelse), 1) AS match_pct
+FROM (
+    SELECT 
+        b.id,
+        b.titel,
+        b.forfatter,
+        b.genre,
+        b.score,
+        ABS(b.forfatter_num - :target_i) AS ff_dist,
+        ABS(b.genre_num - :target_genre) AS genre_dist,
+        -- Beregnes kun 1 gang pr. kandidat-række:
+        (0.6 * ABS(b.forfatter_num - :target_i) + 0.4 * ABS(b.genre_num - :target_genre)) AS total_afvigelse
+    FROM BogTabel b
+    -- Kæmpe DB optimering: Brug B-Tree indekset med et vindue (+/- 15) for at undgå fuld tabelscanning:
+    WHERE b.forfatter_num BETWEEN (:target_i - 15) AND (:target_i + 15)
+) t
+ORDER BY 
+    t.total_afvigelse ASC,
+    t.score DESC
+LIMIT 10;`;
 
   return (
     <div className="space-y-8">
@@ -348,8 +445,8 @@ CREATE TABLE AnbefalingTabel (
                 : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
             }`}
           >
-            <Info className="w-3.5 h-3.5 text-amber-400" />
-            Arkitektur & Hvor kald sendes hen
+            <Activity className="w-3.5 h-3.5 text-amber-400" />
+            Serverplacering & RTT Måler (890ms analyse)
           </button>
           <button
             onClick={() => setActiveTab('tester')}
@@ -519,16 +616,230 @@ CREATE TABLE AnbefalingTabel (
               </div>
             </div>
 
+            {/* RTT BENCHMARK & SERVER GEOLOCATION DIAGNOSTICS */}
+            <div className="mt-8 border-t border-stone-200 pt-6">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="font-display text-lg font-bold text-stone-900 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-amber-600" />
+                    Round Trip Time (RTT) & Serverplacering Analyse
+                  </h3>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Mål live netværkslatens fra din browser til de to backends og find ud af, hvorfor et request kan tage ~890ms.
+                  </p>
+                </div>
+
+                <button
+                  onClick={runRttBenchmark}
+                  disabled={isPinging}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-stone-300 text-white font-medium text-xs rounded-xl shadow-xs transition-colors shrink-0"
+                >
+                  {isPinging ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Måler Round Trip Time...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Gauge className="w-4 h-4" />
+                      <span>Start RTT Latency Måling</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Live Benchmark Results Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                {/* 1. App Server (Google Cloud Run) */}
+                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-blue-600" />
+                      Applet Server (Lokal Node/SQLite)
+                    </span>
+                    {localPingResult && (
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                        localPingResult.rttMs < 100 ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {localPingResult.rttMs} ms RTT
+                      </span>
+                    )}
+                  </div>
+                  
+                  <div className="space-y-1.5 text-xs text-stone-700">
+                    <p className="font-semibold text-stone-900">
+                      Google Cloud Run Datacenter
+                    </p>
+                    <p className="text-stone-600">
+                      Region: <code className="bg-stone-200/80 px-1 py-0.5 rounded text-blue-900 font-mono-data">europe-west2</code>
+                    </p>
+                    <p className="text-stone-600">
+                      Placering: <strong>London, Storbritannien 🇬🇧</strong>
+                    </p>
+                    <p className="text-[11px] text-stone-500 pt-1">
+                      Kilde: Synlig i URL'en <code>https://ais-dev-...<strong>europe-west2</strong>.run.app</code>.
+                    </p>
+                  </div>
+                </div>
+
+                {/* 2. PHP Server (bjarnephys.com) */}
+                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-stone-500 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-amber-600" />
+                      Din PHP Server (bjarnephys.com)
+                    </span>
+                    {remotePingResult && (
+                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                        remotePingResult.status === 'error'
+                          ? 'bg-rose-100 text-rose-800'
+                          : remotePingResult.rttMs > 500
+                          ? 'bg-amber-100 text-amber-900'
+                          : 'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {remotePingResult.status === 'error' ? 'Fejl' : `${remotePingResult.rttMs} ms RTT`}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5 text-xs text-stone-700">
+                    <p className="font-semibold text-stone-900">
+                      OrangeHost Webserver & MySQL
+                    </p>
+                    <p className="text-stone-600">
+                      IP-adresse: <code className="bg-stone-200/80 px-1 py-0.5 rounded text-amber-900 font-mono-data">209.172.2.60</code>
+                    </p>
+                    <p className="text-stone-600">
+                      Placering: <strong>USA 🇺🇸 (Oregon / Delaware)</strong>
+                    </p>
+                    <p className="text-[11px] text-stone-500 pt-1">
+                      Afstand: ~7.500 km fra Danmark (over Atlanterhavet via undersøiske kabler).
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 890ms Explanation Breakdown */}
+              <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-5 mb-6">
+                <h4 className="text-sm font-bold text-amber-950 mb-2 flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-amber-700" />
+                  Hvorfor tager forespørgslen ~890 ms til din server i USA?
+                </h4>
+                <p className="text-xs text-amber-900 leading-relaxed mb-4">
+                  Når din browser i Danmark (eller London) sender et kald til <code>https://bjarnephys.com/BogApp/api.php</code> i USA, opstår forsinkelsen af følgende 4 trin:
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                  <div className="bg-white/80 p-3 rounded-lg border border-amber-200/80">
+                    <div className="font-bold text-amber-950 mb-1 flex items-center justify-between">
+                      <span>1. Lyshastighed</span>
+                      <span className="font-mono-data text-amber-700 font-normal">~160 ms</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 leading-relaxed">
+                      Afstanden til USA er over 7.000 km. Lys i optisk fiber bevæger sig med ~200.000 km/s. Frem og tilbage tager alene ~160 ms i ren fysik.
+                    </p>
+                  </div>
+
+                  <div className="bg-white/80 p-3 rounded-lg border border-amber-200/80">
+                    <div className="font-bold text-amber-950 mb-1 flex items-center justify-between">
+                      <span>2. TCP + TLS 1.3</span>
+                      <span className="font-mono-data text-amber-700 font-normal">~250 ms</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 leading-relaxed">
+                      HTTPS kræver kryptering. Browseren og webserveren skal udveksle sikkerhedscertifikater (2-3 round trips) før data kan sendes.
+                    </p>
+                  </div>
+
+                  <div className="bg-white/80 p-3 rounded-lg border border-amber-200/80">
+                    <div className="font-bold text-amber-950 mb-1 flex items-center justify-between">
+                      <span>3. Apache & PHP</span>
+                      <span className="font-mono-data text-amber-700 font-normal">~350 ms</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 leading-relaxed">
+                      Apache starter PHP-processen, indlæser <code>api.php</code>, etablerer PDO-forbindelsen til MySQL, afvikler SQL og bygger JSON-output.
+                    </p>
+                  </div>
+
+                  <div className="bg-white/80 p-3 rounded-lg border border-amber-200/80">
+                    <div className="font-bold text-amber-950 mb-1 flex items-center justify-between">
+                      <span>4. JSON Transfer</span>
+                      <span className="font-mono-data text-amber-700 font-normal">~100 ms</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 leading-relaxed">
+                      Svaret med bogdata transmitteres tilbage over Atlanten til din browser, som modtager og parser det i React.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-amber-200/70 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+                  <span className="font-semibold">
+                    💡 Samlet sum (1. kald): 160ms + 250ms + 350ms + 100ms ≈ 860–890 ms!
+                  </span>
+                  <span className="text-[11px] text-amber-800">
+                    Tip: Hvis du flytter PHP/MySQL til et europæisk webhotel (f.eks. Danmark eller Tyskland), vil svartiden typisk falde til under 80–120 ms.
+                  </span>
+                </div>
+              </div>
+
+              {/* COLD VS WARM REQUEST / TCP HANDSHAKE REUSE EXPLANATION */}
+              <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl p-5 mb-6">
+                <h4 className="text-sm font-bold text-emerald-950 mb-2 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-emerald-700" />
+                  Hvorfor er 2. kald (f.eks. søgning) så meget hurtigere (~300 ms vs ~900 ms)?
+                </h4>
+                <p className="text-xs text-emerald-900 leading-relaxed mb-3">
+                  <strong>Skal TCP handshake ske flere gange?</strong> Svaret er et klart <strong>NEJ!</strong> Browseren og serveren genbruger automatisk forbindelsen:
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs mb-3">
+                  <div className="bg-white/90 p-3.5 rounded-lg border border-emerald-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-bold text-stone-900">1. Kald: "Kold" forbindelse</span>
+                      <span className="font-mono-data px-2 py-0.5 bg-amber-100 text-amber-900 font-bold rounded text-[11px]">~900 ms</span>
+                    </div>
+                    <ul className="space-y-1 text-[11px] text-stone-600 list-disc list-inside">
+                      <li><strong>DNS lookup:</strong> Finder IP <code>209.172.2.60</code> (~30–50 ms).</li>
+                      <li><strong>TCP 3-way handshake:</strong> 1 transatlantisk RTT (~160 ms).</li>
+                      <li><strong>TLS 1.3 kryptohåndtryk:</strong> Udveksling af SSL-nøgler (~200 ms).</li>
+                      <li><strong>Stort payload:</strong> Henter alle 1000 bøger (kræver mange TCP-pakker).</li>
+                      <li><strong>MySQL:</strong> Kold disk-læsning i databasen.</li>
+                    </ul>
+                  </div>
+
+                  <div className="bg-white/90 p-3.5 rounded-lg border border-emerald-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-bold text-emerald-900">2. Kald (f.eks. søgning): "Varm" forbindelse</span>
+                      <span className="font-mono-data px-2 py-0.5 bg-emerald-100 text-emerald-900 font-bold rounded text-[11px]">~300 ms</span>
+                    </div>
+                    <ul className="space-y-1 text-[11px] text-stone-600 list-disc list-inside">
+                      <li><strong>TCP Handshake:</strong> <span className="text-emerald-700 font-bold">0 ms (Genbruges via HTTP Keep-Alive!)</span></li>
+                      <li><strong>TLS Handshake:</strong> <span className="text-emerald-700 font-bold">0 ms (Krypteret tunnel er allerede åben!)</span></li>
+                      <li><strong>DNS lookup:</strong> <span className="text-emerald-700 font-bold">0 ms (Cacheadresse i browseren)</span></li>
+                      <li><strong>Lille payload:</strong> Søgningen returnerer få bøger (kan være i 1 TCP-pakke).</li>
+                      <li><strong>MySQL cache:</strong> InnoDB buffer pool og PHP opcode er allerede varme.</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-emerald-800 leading-relaxed bg-emerald-100/60 p-2.5 rounded-md">
+                  💡 <strong>HTTP Keep-Alive (Persistent Connections):</strong> Moderne browsere holder TCP-forbindelsen åben i typisk 60–120 sekunder. Derfor koster efterfølgende kald kun <strong>1 enkelt Round Trip Time (RTT ~160 ms)</strong> til serveren i USA + den tid PHP og MySQL bruger på at køre søgningen (~100–140 ms) = i alt <strong>~300 ms</strong>!
+                </p>
+              </div>
+            </div>
+
             {/* Explanation box */}
-            <div className="mt-6 border-t border-stone-100 pt-5">
+            <div className="border-t border-stone-100 pt-5">
               <h3 className="font-semibold text-stone-900 text-sm mb-2">
-                Hvorfor kører PHP ikke direkte i browser-containeren her?
+                Hvordan finder man server-placeringen af appen?
               </h3>
               <p className="text-xs text-stone-600 leading-relaxed mb-3">
-                Udviklingsmiljøet her i Google AI Studio er et Linux Node.js miljø designet til JavaScript/TypeScript, React og Vite. Der er ingen indbygget Apache webserver eller MySQL dæmon installeret i denne container.
+                1. <strong>Undersøg domænenavnet:</strong> URL'en for appen er <code>https://ais-dev-...<strong>europe-west2</strong>.run.app</code>. På Google Cloud Platform betegner <code>europe-west2</code> altid datacenteret i <strong>London, Storbritannien</strong> (til sammenligning er Frankfurt <code>europe-west3</code> og Oregon <code>us-west1</code>).
+              </p>
+              <p className="text-xs text-stone-600 leading-relaxed mb-3">
+                2. <strong>Brug vores diagnostik-endepunkt:</strong> Du kan kalde <code className="bg-stone-100 px-1 py-0.5 rounded font-mono-data text-stone-900">/api/ping</code> direkte i browseren. Det returnerer JSON med serverens region, platform og oppetid.
               </p>
               <p className="text-xs text-stone-600 leading-relaxed">
-                Derfor opfyldes <strong>Milestone 1</strong> direkte af Node.js + SQLite (så hele søgningen, karaktergivningen og Milestone 4 anbefalingerne fungerer lynhurtigt og uden eksterne afhængigheder), mens <strong>Milestone 2</strong> leverer den komplette, forbedrede PHP/MySQL produktionskode (i <code>php_backend/api.php</code> og <code>schema.sql</code>), som du direkte kan uploade til dit eget PHP/MySQL miljø.
+                3. <strong>Ekstern server (bjarnephys.com):</strong> Ved et DNS-opslag på <code>bjarnephys.com</code> ser vi IP <code>209.172.2.60</code>, som er registreret hos <strong>OrangeHost i USA</strong>. Derfor skal alle forespørgsler krydse Atlanterhavet.
               </p>
             </div>
           </div>

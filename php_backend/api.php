@@ -36,10 +36,11 @@ try {
     exit();
 }
 
-$requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+// Support both direct path routing and ?route=/api/... parameter routing
+$requestUri = isset($_GET['route']) ? $_GET['route'] : parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Simpel router
+// Router
 if ($method === 'GET' && strpos($requestUri, '/api/books') !== false) {
     handleGetBooks($pdo);
 } elseif ($method === 'POST' && strpos($requestUri, '/api/users') !== false) {
@@ -48,6 +49,10 @@ if ($method === 'GET' && strpos($requestUri, '/api/books') !== false) {
     handleGetRecommendations($pdo);
 } elseif ($method === 'GET' && strpos($requestUri, '/api/users') !== false) {
     handleGetUsers($pdo);
+} elseif ($method === 'GET' && strpos($requestUri, '/api/stats') !== false) {
+    handleGetStats($pdo);
+} elseif ($method === 'POST' && preg_match('#/api/books/(\d+)/rate#', $requestUri, $m)) {
+    handleRateBook($pdo, intval($m[1]));
 } else {
     http_response_code(404);
     echo json_encode(['error' => 'Endepunkt ikke fundet: ' . $requestUri]);
@@ -262,7 +267,60 @@ function handleGetUsers(PDO $pdo) {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     $users = $stmt->fetchAll();
-
     echo json_encode(['users' => $users], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+}
+
+function handleGetStats(PDO $pdo) {
+    $books = $pdo->query("SELECT COUNT(*) FROM BogTabel")->fetchColumn();
+    $users = $pdo->query("SELECT COUNT(*) FROM BrugerTabel")->fetchColumn();
+    $authors = $pdo->query("SELECT COUNT(DISTINCT forfatter) FROM BogTabel")->fetchColumn();
+    $genres = $pdo->query("SELECT COUNT(DISTINCT genre) FROM BogTabel")->fetchColumn();
+    $avgScore = $pdo->query("SELECT AVG(score) FROM BogTabel")->fetchColumn();
+
+    echo json_encode([
+        'totalBooks' => intval($books),
+        'totalUsers' => intval($users),
+        'totalAuthors' => intval($authors),
+        'totalGenres' => intval($genres),
+        'averageScore' => round(floatval($avgScore), 2),
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+}
+
+function handleRateBook(PDO $pdo, int $bookId) {
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    if (!isset($data['score']) || !is_numeric($data['score'])) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Score skal være et tal mellem 0 og 9']);
+        return;
+    }
+
+    $score = max(0, min(9, floatval($data['score'])));
+    
+    $stmt = $pdo->prepare("SELECT * FROM BogTabel WHERE id = ?");
+    $stmt->execute([$bookId]);
+    $book = $stmt->fetch();
+    if (!$book) {
+        http_response_code(404);
+        echo json_encode(['error' => 'Bogen findes ikke']);
+        return;
+    }
+
+    $newCount = intval($book['rating_count']) + 1;
+    $newTotal = floatval($book['total_score']) + $score;
+    $newAvg = round($newTotal / $newCount, 2);
+
+    $upd = $pdo->prepare("UPDATE BogTabel SET score = ?, rating_count = ?, total_score = ? WHERE id = ?");
+    $upd->execute([$newAvg, $newCount, $newTotal, $bookId]);
+
+    $stmt->execute([$bookId]);
+    $updatedBook = $stmt->fetch();
+    $updatedBook['score'] = floatval($updatedBook['score']);
+
+    echo json_encode([
+        'success' => true,
+        'book' => $updatedBook,
+        'message' => "Score for {$updatedBook['titel']} opdateret til {$updatedBook['score']}",
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 }
 ?>
